@@ -1,76 +1,167 @@
+#include "lib.h"
 
-/*
-20201111
-bootloader 5k   app 60k  bin 60k
-STM32C8T6 SIZE 64KB  RAM 20KB字节
+#define MAX_BOOT_NUM        3072//3k
+#define MAX_APP_NUM         63488  
+#define MAX_BIN1_NUM        MAX_APP_NUM
+#define MAX_BIN2_NUM        MAX_APP_NUM
 
-20201106 
-    增加焊接过程 无法按动焊层按键的功能
-    优化界面布局，使得焊层更易被发现。
+#define MAX_PARA_NUM        64
 
-int Date_20200522(void)
+#define STM32_FLASH_BASE    0x08000000 	//STM32 FLASH的起始地址
+#define ADDR_APP_OFFSET     MAX_BOOT_NUM
+#define ADDR_BIN1_OFFSET    MAX_BOOT_NUM+MAX_APP_NUM
+//#define ADDR_BIN2_OFFSET    MAX_BOOT_NUM+MAX_APP_NUM+MAX_BIN1_NUM
+#define ADDR_PARA_OFFSET    MAX_BOOT_NUM+MAX_APP_NUM+MAX_BIN1_NUM
+
+ 
+#define ADDR_INIT           0x00
+#define ADDR_DEVID          0x02
+#define ADDR_ADDR           0x06
+#define ADDR_FREQ           0x07
+#define ADDR_ValidDev       0x08
+
+#define ADDR_BinLen1        0x09
+#define ADDR_BinSum1        0x0d
+#define ADDR_Updata1        0x11
+#define ADDR_BinLen2        0x13
+#define ADDR_BinSum2        0x17
+#define ADDR_Updata2        0x1b
+#define ADDR_Cidnum         0x1d
+
+
+
+#define INIT_OK             0xaabb
+#define UPDATA_OK           0x7788
+
+#define MaxDatabyte         STM_SECTOR_SIZE
+typedef struct
 {
-	目标地址0xa 源地址0x08 3位识别帧0x01
-    初始化 主机发送焊层指令，使本机焊层初始化为主机已存储的焊层，标志位置1
-    主机发送焊层和焊层符号如（1，"RW" ，max_layer）,
-    本设备接收到后，显示“RW”，
-    按下按键增加焊层到2 ，3 等 ，在max_layer内叠加，
-    主机接收到后，改变焊层和显示的值
-    生成随机序列号匹配主机，主机不对，标志位置0
+    u8  Bindata[MaxDatabyte];
+    u32 Datalen;
+    u32 Checksum;
+    u16 Flag;
+} UPDATA_CTRL;
+
+u8 MEM_Databuf[MAX_PARA_NUM*2];
+UPDATA_CTRL UpdataCtrl;
+typedef  void (*iapfun)(void);				//定义一个函数类型的参数.
+iapfun jump2app;
+
+
+    
+long _BIN_Checksum(UPDATA_CTRL* Updata)
+{
+    long Datacnt=0,Databyte=0,cnt=0;
+    long Checksum=0x10000000;
+    while(1)
+    {
+        if(Updata->Datalen-Datacnt>MaxDatabyte)
+        {
+            Databyte=MaxDatabyte;
+        }
+        else
+        {
+            Databyte=Updata->Datalen-Datacnt;
+        }
+
+        if(Databyte!=0)
+        {
+            STMFLASH_Read(STM32_FLASH_BASE+ADDR_BIN1_OFFSET+Datacnt,(u16*)Updata->Bindata,Databyte/2);
+            for(cnt=0; cnt<Databyte; cnt++)
+            {
+                Checksum-=Updata->Bindata[cnt];
+            }
+            Datacnt+=Databyte;
+        }
+        else
+        {
+            return Checksum;
+        }
+    }
+
 }
 
-20200515
-CAN通信发送互相发送数据 通信失败则报错
-数码管显示焊层 以及报错相关信息
-按键增加或者减少焊层，发送给数据采集盒
-
-通过CAN发送数据下载
+/*
 
 
-//立焊层 单独的按键，按下后单独的焊层，在焊层数据里面又没有显示。
-
-上的脚本中首先需要计算GPIO的编号，比如需要采用PC(23)，那么C组是第三组那么可以利用公式
-
-
-其中num是GPIO的编号，n是第几组gpio，m是当前的gpio的序号。经过计算PC23的GPIO编号为87。
-
-所以当执行
 */
+u8 _APP_Update_TASK(UPDATA_CTRL* Updata)
+{
+    long Datacnt=0,Databyte=0;
+    while(1)
+    {
+        if(Updata->Datalen-Datacnt>MaxDatabyte)
+        {
+            Databyte=MaxDatabyte;
+        }
+        else
+        {
+            Databyte=Updata->Datalen-Datacnt;
+        }
 
+        if(Databyte!=0)
+        {
+            STMFLASH_Read(STM32_FLASH_BASE+ADDR_BIN1_OFFSET+Datacnt,(u16*)Updata->Bindata,Databyte/2);
+            STMFLASH_WriteNoErase(STM32_FLASH_BASE+ADDR_APP_OFFSET+Datacnt,(u16*)Updata->Bindata,Databyte/2);
+            Datacnt+=Databyte;
+        }
+        else
+        {
+            return 1;
+        }
+    }
+}
 
-#include "lib.h"
-//#include	"CH454CMD.H"
-#include "oled.h"
-#include "led.h"
-//#include "font.h" 
-#include "pic.h"
-#include "ShowInterface.h"
+//跳转到应用程序段
+//appxaddr:用户代码起始地址.
+void iap_load_app(u32 appxaddr)
+{
+    if(((*(vu32*)appxaddr)&0x2FFE0000)==0x20000000)	//检查栈顶地址是否合法.
+    {
+        jump2app=(iapfun)*(vu32*)(appxaddr+4);		//用户代码区第二个字为程序开始地址(复位地址)
+        MSR_MSP(*(vu32*)appxaddr);					//初始化APP堆栈指针(用户代码区的第一个字用于存放栈顶地址)
+        jump2app();									//跳转到APP.
+    }
+}
+
 int main(void)
-{		
+{
+    u16 INIT_FLAG=0;
+    long Checksum=0;
     Stm32_Clock_Init(9);	//系统时钟设置
-	MY_NVIC_SetVectorTable(NVIC_VectTab_FLASH,ADDR_APP_OFFSET);
-	delay_init(72);
-    uart_init(72,9600);	
-    TIM2_Int_Init(9,7199);
-    CAN_Mode_Init(1,8,7,9,0);
-    EXTIX_Init();
-	SysTask_Create();
-    _SEND_GetReady(); 
-    LED_Init();
-    OLED_Init();
- //   LCD_Fill(0,0,LCD_W,LCD_H,WHITE);
-	LCD_ShowPicture(40,90,240,46,gImage_black);
-	delay_ms(65535);  
-    LCD_Fill(0,0,LCD_W,LCD_H,WHITE);
-	Interface.page = 1;//PageMain;
-	//_UAPP_Comm_INIT();
+    delay_init(72);
+    
+    STMFLASH_Read(STM32_FLASH_BASE+ADDR_PARA_OFFSET,(u16*)MEM_Databuf,MAX_PARA_NUM);
+    memcpy(&INIT_FLAG,MEM_Databuf+ADDR_INIT,2);
+    memcpy(&UpdataCtrl.Flag,MEM_Databuf+ADDR_Updata1,2);
+    memcpy(&UpdataCtrl.Datalen,MEM_Databuf+ADDR_BinLen1,4);
+    memcpy(&UpdataCtrl.Checksum,MEM_Databuf+ADDR_BinSum1,4);
+    if((UpdataCtrl.Flag==UPDATA_OK)&&(UpdataCtrl.Datalen<MAX_BIN1_NUM))//&&(INIT_FLAG==INIT_OK)
+    {
+        Checksum=_BIN_Checksum(&UpdataCtrl);
+        if(Checksum==UpdataCtrl.Checksum)
+        {
+            STMFLASH_Erase(STM32_FLASH_BASE+ADDR_APP_OFFSET,MAX_APP_NUM/2);
+            _APP_Update_TASK(&UpdataCtrl);
+            UpdataCtrl.Flag=0;
+            memcpy(MEM_Databuf+ADDR_Updata1,&UpdataCtrl.Flag,2);
+            STMFLASH_Write(STM32_FLASH_BASE+ADDR_PARA_OFFSET,(u16*)MEM_Databuf,MAX_PARA_NUM);
+        }
+    }
+    
+//	UpdataCtrl.Flag=UPDATA_OK;
+//	INIT_FLAG=INIT_OK;
+//	UpdataCtrl.Datalen=20710;
+//	memcpy(MEM_Databuf+ADDR_INIT,&INIT_FLAG,2);
+//	memcpy(MEM_Databuf+ADDR_Updata,&UpdataCtrl.Flag,2);
+//	memcpy(MEM_Databuf+ADDR_BinLen,&UpdataCtrl.Datalen,4);
+//	memcpy(MEM_Databuf+ADDR_BinSum,&Checksum,4);
+//	STMFLASH_Write(STM32_FLASH_BASE+ADDR_PARA_OFFSET,(u16*)MEM_Databuf,MAX_PARA_NUM);
+    iap_load_app(STM32_FLASH_BASE+ADDR_APP_OFFSET);
+    while(1)
+    {
 
-	
-	while(1)
-	{
-		
-	  Timer1_IsrHandler();
-	}	
+    }
 }
 
 
